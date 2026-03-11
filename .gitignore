@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Large binary score files (regenerable)
+results/*_scores.npy
+results/**/*_scores.npy
+
+# Logs (regenerable)
+results/experiments.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
