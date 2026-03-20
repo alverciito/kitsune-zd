@@ -1,9 +1,11 @@
 """
-Deep MLP (Multilayer) Windowed Denoising Autoencoder (PyTorch).
+Conv2D Windowed Denoising Autoencoder (PyTorch).
 
-Unlike the single-layer ELM, this uses a 3-layer encoder/decoder with batch training:
-  Encoder: n_visible -> h1 -> h2 (bottleneck)
-  Decoder: h2 -> h1 -> n_visible
+Treats each (seq_len, n_visible) window as a single-channel 2D "image".
+Architecture:
+  Conv2d(1, 8, kernel_size=3, padding=1, relu) -> Conv2d(8, 16, 3, padding=1, relu)
+  -> AdaptiveAvgPool2d(1) -> Linear(16, n_hidden) -> Linear(n_hidden, seq_len * n_visible)
+  -> Reshape to (seq_len, n_visible)
 
 Same windowing, normalization, and train/execute protocol as Conv1D/Transformer.
 """
@@ -12,48 +14,47 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
-from ..utils import create_windows
-from ..config import EPSILON, BATCH_SIZE
+from ...common.utils import create_windows
+from ...common.config import EPSILON, BATCH_SIZE
 
 
-class DeepMLPModel(nn.Module):
-    """Multilayer MLP autoencoder operating on windowed sequences."""
+class Conv2DModel(nn.Module):
+    """Conv2D autoencoder: treats (seq_len, n_visible) as a 1-channel image."""
 
     def __init__(self, n_visible: int, n_hidden: int, seq_len: int):
         super().__init__()
         self.n_visible = n_visible
         self.seq_len = seq_len
-        input_dim = seq_len * n_visible
 
-        # Intermediate sizes
-        h1 = max(1, input_dim // 4)
-        h2 = max(1, n_hidden)
+        # Encoder
+        self.enc_conv1 = nn.Conv2d(1, 8, kernel_size=3, padding=1)
+        self.enc_conv2 = nn.Conv2d(8, 16, kernel_size=3, padding=1)
+        self.enc_pool = nn.AdaptiveAvgPool2d(1)  # -> (batch, 16, 1, 1)
+        self.enc_fc = nn.Linear(16, n_hidden)
 
-        # Encoder: input -> h1 -> h2
-        self.enc1 = nn.Linear(input_dim, h1)
-        self.enc2 = nn.Linear(h1, h2)
-
-        # Decoder: h2 -> h1 -> input
-        self.dec1 = nn.Linear(h2, h1)
-        self.dec2 = nn.Linear(h1, input_dim)
+        # Decoder
+        self.dec_fc1 = nn.Linear(n_hidden, 16)
+        self.dec_fc2 = nn.Linear(16, seq_len * n_visible)
 
     def forward(self, x):
-        # x: (batch, seq_len, n_visible) -> flatten
+        # x: (batch, seq_len, n_visible) -> add channel dim
         b = x.shape[0]
-        h = x.view(b, -1)
+        h = x.unsqueeze(1)                        # (batch, 1, seq_len, n_visible)
 
         # Encode
-        h = F.relu(self.enc1(h))
-        h = F.relu(self.enc2(h))
+        h = F.relu(self.enc_conv1(h))             # (batch, 8, seq_len, n_visible)
+        h = F.relu(self.enc_conv2(h))             # (batch, 16, seq_len, n_visible)
+        h = self.enc_pool(h).view(b, 16)          # (batch, 16)
+        z = F.relu(self.enc_fc(h))                # (batch, n_hidden)
 
         # Decode
-        h = F.relu(self.dec1(h))
-        h = self.dec2(h)
+        h = F.relu(self.dec_fc1(z))               # (batch, 16)
+        h = self.dec_fc2(h)                        # (batch, seq_len * n_visible)
+        out = h.view(b, self.seq_len, self.n_visible)
+        return out
 
-        return h.view(b, self.seq_len, self.n_visible)
 
-
-class DeepMLPAutoencoder:
+class Conv2DAutoencoder:
     """
     Wrapper matching the Conv1D/Transformer interface.
     Same windowing, normalization, and train/execute protocol.
@@ -67,7 +68,7 @@ class DeepMLPAutoencoder:
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
 
         torch.manual_seed(1234)
-        self.model = DeepMLPModel(n_visible, self.n_hidden, seq_len).to(self.device)
+        self.model = Conv2DModel(n_visible, self.n_hidden, seq_len).to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, betas=(0.9, 0.999))
         self.criterion = nn.MSELoss()
 

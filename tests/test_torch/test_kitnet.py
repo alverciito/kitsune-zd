@@ -1,7 +1,7 @@
-"""End-to-end tests for KitNET pipeline."""
+"""End-to-end tests for KitNET pipeline (PyTorch backend)."""
 import numpy as np
 import pytest
-from src.kitnet import KitNET
+from src.torch.kitnet import KitNET
 
 
 def _synth_dataset(n_samples=1500, n_features=20, attack_start=1200, seed=42):

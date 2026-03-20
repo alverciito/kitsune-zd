@@ -1,10 +1,10 @@
 """Tests for detectors: CentroidDetector, DistributionDetector, filters, WindowDiff."""
 import numpy as np
 import pytest
-from src.detectors.centroid import CentroidDetector
-from src.detectors.distribution import DistributionDetector
-from src.detectors.filters import mean_filter, median_filter
-from src.detector import windowdiff
+from src.common.detectors.centroid import CentroidDetector
+from src.common.detectors.distribution import DistributionDetector
+from src.common.detectors.filters import mean_filter, median_filter
+from src.common.detector import windowdiff
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +264,7 @@ class TestThresholdSweepIntegration:
 
     def test_perfect_separation(self):
         """Clearly separable scores should give F1 near 1.0."""
-        from src.detector import threshold_sweep
+        from src.common.detector import threshold_sweep
         scores = np.concatenate([np.ones(500) * 0.01, np.ones(500) * 100.0])
         labels = np.concatenate([np.zeros(500), np.ones(500)]).astype(np.int32)
         metrics = threshold_sweep(scores, labels)
@@ -273,7 +273,7 @@ class TestThresholdSweepIntegration:
 
     def test_random_scores_low_f1(self):
         """Random scores on balanced labels should give mediocre F1."""
-        from src.detector import threshold_sweep
+        from src.common.detector import threshold_sweep
         rng = np.random.RandomState(0)
         scores = rng.rand(1000)
         labels = np.concatenate([np.zeros(500), np.ones(500)]).astype(np.int32)
@@ -282,7 +282,7 @@ class TestThresholdSweepIntegration:
 
     def test_all_attack_labels(self):
         """All labels=1: best F1 should be achievable at low threshold."""
-        from src.detector import threshold_sweep
+        from src.common.detector import threshold_sweep
         scores = np.random.rand(100)
         labels = np.ones(100, dtype=np.int32)
         metrics = threshold_sweep(scores, labels)

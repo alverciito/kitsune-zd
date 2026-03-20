@@ -1,8 +1,8 @@
-"""Tests for src/utils.py: windowing, normalization, RMSE."""
+"""Tests for src/common/utils.py: windowing, normalization, RMSE."""
 import numpy as np
 import pytest
-from src.utils import create_windows, create_windows_ar, normalize_minmax, compute_rmse_per_sample, sigmoid
-from src.config import EPSILON
+from src.common.utils import create_windows, create_windows_ar, normalize_minmax, compute_rmse_per_sample, sigmoid
+from src.common.config import EPSILON
 
 
 class TestCreateWindows:

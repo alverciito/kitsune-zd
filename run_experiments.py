@@ -30,13 +30,12 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from src.config import (ATTACKS, RESULTS_DIR, FM_GRACE_PERIOD, AD_GRACE_PERIOD,
-                         N_FEATURES, CIC2017_DAYS, CIC2018_DAYS,
-                         DEFAULT_CLUSTERING, DEFAULT_OUTPUT_AE)
-from src.database import load_attack, load_cic2017, load_cic2018, load_aci_iot
-from src.kitnet import KitNET
-from src.detector import threshold_sweep, windowdiff, plot_roc, save_results
-from src.detectors import CentroidDetector, DistributionDetector
+from src.common.config import (ATTACKS, RESULTS_DIR, FM_GRACE_PERIOD, AD_GRACE_PERIOD,
+                                N_FEATURES, CIC2017_DAYS, CIC2018_DAYS,
+                                DEFAULT_CLUSTERING, DEFAULT_OUTPUT_AE)
+from src.common.database import load_attack, load_cic2017, load_cic2018, load_aci_iot
+from src.common.detector import threshold_sweep, windowdiff, plot_roc, save_results
+from src.common.detectors import CentroidDetector, DistributionDetector
 
 logging.basicConfig(
     level=logging.INFO,
@@ -192,9 +191,19 @@ def main():
                         help='Dataset to use')
     parser.add_argument('--day', default=None,
                         help='Specific day for CIC-2017/2018 datasets')
+    parser.add_argument('--backend', default='torch', choices=['torch', 'tf'],
+                        help='Backend framework (torch or tf)')
     parser.add_argument('--no-cache', action='store_true',
                         help='Ignore cached scores and recompute')
     args = parser.parse_args()
+
+    # Import KitNET from the selected backend
+    global KitNET
+    if args.backend == 'tf':
+        os.environ['KITSUNE_BACKEND'] = 'tf'
+        from src.tf.kitnet import KitNET
+    else:
+        from src.torch.kitnet import KitNET
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
 

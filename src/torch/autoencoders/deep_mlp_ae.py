@@ -1,51 +1,62 @@
 """
-Conv1D Windowed Denoising Autoencoder (PyTorch).
+Deep MLP (Multilayer) Windowed Denoising Autoencoder (PyTorch).
 
-Replaces the original TensorFlow implementation. Architecture matches the original:
-  Conv1D(in=n_visible, out=3, kernel_size=seq_len, padding='same', relu)
-  -> Linear(3, n_hidden, relu)
-  -> Linear(n_hidden, n_visible, relu)
+Unlike the single-layer ELM, this uses a 3-layer encoder/decoder with batch training:
+  Encoder: n_visible -> h1 -> h2 (bottleneck)
+  Decoder: h2 -> h1 -> n_visible
 
-Input/Output shape: (batch, seq_len, n_visible).
-
-BUG FIX #2: Evaluation NEVER shuffles data. Only training DataLoader shuffles.
+Same windowing, normalization, and train/execute protocol as Conv1D/Transformer.
 """
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
-from ..utils import create_windows
-from ..config import EPSILON, BATCH_SIZE
+from ...common.utils import create_windows
+from ...common.config import EPSILON, BATCH_SIZE
 
 
-class Conv1DModel(nn.Module):
-    """Conv1D autoencoder model. Reconstructs windowed input sequences."""
+class DeepMLPModel(nn.Module):
+    """Multilayer MLP autoencoder operating on windowed sequences."""
 
     def __init__(self, n_visible: int, n_hidden: int, seq_len: int):
         super().__init__()
-        # Conv1D: PyTorch expects (batch, channels, length)
-        # Original TF: Conv1D(filters=3, kernel_size=seq_len, padding='same')
-        self.conv = nn.Conv1d(n_visible, 3, kernel_size=seq_len, padding='same')
-        self.dense1 = nn.Linear(3, n_hidden)
-        self.dense2 = nn.Linear(n_hidden, n_visible)
+        self.n_visible = n_visible
+        self.seq_len = seq_len
+        input_dim = seq_len * n_visible
+
+        # Intermediate sizes
+        h1 = max(1, input_dim // 4)
+        h2 = max(1, n_hidden)
+
+        # Encoder: input -> h1 -> h2
+        self.enc1 = nn.Linear(input_dim, h1)
+        self.enc2 = nn.Linear(h1, h2)
+
+        # Decoder: h2 -> h1 -> input
+        self.dec1 = nn.Linear(h2, h1)
+        self.dec2 = nn.Linear(h1, input_dim)
 
     def forward(self, x):
-        # x: (batch, seq_len, n_visible)
-        x = x.permute(0, 2, 1)       # -> (batch, n_visible, seq_len)
-        x = F.relu(self.conv(x))      # -> (batch, 3, seq_len)
-        x = x.permute(0, 2, 1)       # -> (batch, seq_len, 3)
-        x = F.relu(self.dense1(x))   # -> (batch, seq_len, n_hidden)
-        x = F.relu(self.dense2(x))   # -> (batch, seq_len, n_visible)
-        return x
+        # x: (batch, seq_len, n_visible) -> flatten
+        b = x.shape[0]
+        h = x.view(b, -1)
+
+        # Encode
+        h = F.relu(self.enc1(h))
+        h = F.relu(self.enc2(h))
+
+        # Decode
+        h = F.relu(self.dec1(h))
+        h = self.dec2(h)
+
+        return h.view(b, self.seq_len, self.n_visible)
 
 
-class Conv1DAutoencoder:
+class DeepMLPAutoencoder:
     """
-    Wrapper matching the ELMAutoencoder interface.
-
-    Handles normalization, windowing, training (with shuffle) and evaluation
-    (WITHOUT shuffle - Bug #2 fix).
+    Wrapper matching the Conv1D/Transformer interface.
+    Same windowing, normalization, and train/execute protocol.
     """
 
     def __init__(self, n_visible: int, hidden_ratio: float = 0.75,
@@ -56,40 +67,27 @@ class Conv1DAutoencoder:
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
 
         torch.manual_seed(1234)
-        self.model = Conv1DModel(n_visible, self.n_hidden, seq_len).to(self.device)
+        self.model = DeepMLPModel(n_visible, self.n_hidden, seq_len).to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, betas=(0.9, 0.999))
         self.criterion = nn.MSELoss()
 
-        # Normalization (set during training)
         self.norm_min = None
         self.norm_max = None
-        # Back window for continuity during execution
         self.back_window = None
 
     def _normalize(self, x: np.ndarray) -> np.ndarray:
         return (x - self.norm_min) / (self.norm_max - self.norm_min + EPSILON)
 
     def train(self, data: np.ndarray) -> np.ndarray:
-        """
-        Train on data of shape (N, n_visible).
-        1. Compute min/max norms
-        2. Normalize to [0,1]
-        3. Create sliding windows
-        4. Train model for 1 epoch WITH shuffled DataLoader
-        5. Evaluate WITHOUT shuffle -> per-window RMSE
-
-        Returns: Per-window RMSE array of shape (N - seq_len + 1,).
-        """
-        # Compute and store norms
+        """Train on (N, n_visible). Returns per-window RMSE of shape (N - seq_len + 1,)."""
         self.norm_max = np.max(data, axis=0)
         self.norm_min = np.min(data, axis=0)
         x_norm = self._normalize(data).astype(np.float32)
 
-        # Create windows: (N - seq_len + 1, seq_len, n_visible)
         windows = create_windows(x_norm, self.seq_len).copy()
         tensor_x = torch.from_numpy(windows).to(self.device)
 
-        # Train with shuffled DataLoader
+        # Train with shuffle
         dataset = TensorDataset(tensor_x, tensor_x)
         loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
         self.model.train()
@@ -100,34 +98,23 @@ class Conv1DAutoencoder:
             loss.backward()
             self.optimizer.step()
 
-        # Evaluate WITHOUT shuffle for per-window RMSE
+        # Evaluate without shuffle
         self.model.eval()
         rmse_list = []
         eval_loader = DataLoader(TensorDataset(tensor_x), batch_size=BATCH_SIZE * 4, shuffle=False)
         with torch.no_grad():
             for (xb,) in eval_loader:
                 zb = self.model(xb)
-                # Per-window MSE: mean over (seq_len, n_visible) -> per-window scalar
                 mse = torch.mean((xb - zb) ** 2, dim=(1, 2))
                 rmse_list.append(torch.sqrt(mse).cpu().numpy())
 
-        # Save back window for execution continuity
         self.back_window = x_norm[-(self.seq_len - 1):]
-
         return np.concatenate(rmse_list)
 
     def execute(self, data: np.ndarray) -> np.ndarray:
-        """
-        Score data of shape (N, n_visible). Returns per-sample RMSE.
-
-        Prepends saved back_window for sliding window continuity,
-        so output length == N (not N - seq_len + 1).
-
-        BUG FIX #2: NO shuffle during evaluation.
-        """
+        """Score data of shape (N, n_visible). Returns per-sample RMSE."""
         x_norm = self._normalize(data).astype(np.float32)
 
-        # Prepend back window for continuity
         if self.back_window is not None:
             x_ext = np.concatenate([self.back_window, x_norm], axis=0)
         else:
@@ -149,14 +136,8 @@ class Conv1DAutoencoder:
                 rmse_list.append(torch.sqrt(mse).cpu().numpy())
 
         rmse = np.concatenate(rmse_list)
-
-        # Save back window for next execution call
         self.back_window = x_norm[-(self.seq_len - 1):]
 
-        # Trim to match input length (remove extra from back_window prepend)
-        # x_ext has len(back_window) + len(data) samples
-        # windows has len(x_ext) - seq_len + 1 entries
-        # We want the last len(data) RMSE values
         if len(rmse) >= len(data):
             return rmse[-len(data):]
         return rmse

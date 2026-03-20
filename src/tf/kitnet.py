@@ -19,18 +19,15 @@ BUG FIX #3: Output layer receives properly shaped (N, n_aes) RMSE matrix.
 """
 import logging
 import numpy as np
-from .clustering import get_clustering
-from .autoencoders.elm import ELMAutoencoder
+from ..common.clustering import get_clustering
+from ..common.autoencoders.elm import ELMAutoencoder
 from .autoencoders.conv1d_ae import Conv1DAutoencoder
 from .autoencoders.transformer_ae import TransformerAutoencoder
 from .autoencoders.conv2d_ae import Conv2DAutoencoder
 from .autoencoders.deep_mlp_ae import DeepMLPAutoencoder
-try:
-    from tf.lstm_ae import LSTMAutoencoder
-except ImportError:
-    LSTMAutoencoder = None
-from .autoencoders.statistical_ae import StatisticalAnomaly
-from . import config
+from .autoencoders.lstm_ae import LSTMAutoencoder
+from ..common.autoencoders.statistical_ae import StatisticalAnomaly
+from ..common import config
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +52,7 @@ class KitNET:
         ad_grace: Number of samples for AD training phase.
         exec_window: Batch size for execution phase.
         seq_len: Window size for windowed variants.
-        device: PyTorch device for DL variants.
+        device: Device string (accepted for API compatibility, ignored by TF).
     """
 
     def __init__(self, n_features: int, ae_type: str = 'elm',
@@ -101,16 +98,16 @@ class KitNET:
             return StatisticalAnomaly(n_visible)
         elif self.ae_type == 'conv1d':
             return Conv1DAutoencoder(n_visible, self.hidden_ratio, self.lr,
-                                     self.seq_len, self.device)
+                                     self.seq_len, device=self.device)
         elif self.ae_type == 'conv2d':
             return Conv2DAutoencoder(n_visible, self.hidden_ratio, self.lr,
-                                     self.seq_len, self.device)
+                                     self.seq_len, device=self.device)
         elif self.ae_type == 'transformer':
             return TransformerAutoencoder(n_visible, self.hidden_ratio, self.lr,
-                                          self.seq_len, self.device)
+                                          self.seq_len, device=self.device)
         elif self.ae_type == 'deep_mlp':
             return DeepMLPAutoencoder(n_visible, self.hidden_ratio, self.lr,
-                                      self.seq_len, self.device)
+                                      self.seq_len, device=self.device)
         elif self.ae_type == 'lstm':
             return LSTMAutoencoder(n_visible, self.hidden_ratio, self.lr,
                                     self.seq_len, ar=self.ar, device=self.device)

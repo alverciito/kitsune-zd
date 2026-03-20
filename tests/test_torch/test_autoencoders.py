@@ -1,14 +1,15 @@
-"""Tests for all autoencoder variants: ELM, Statistical, Conv1D, Conv2D, Transformer, DeepMLP."""
+"""Tests for all PyTorch autoencoder variants: ELM, Statistical, Conv1D, Conv2D, Transformer, DeepMLP, LSTM."""
 import numpy as np
 import pytest
 import torch
 
-from src.autoencoders.elm import ELMAutoencoder
-from src.autoencoders.statistical_ae import StatisticalAnomaly
-from src.autoencoders.conv1d_ae import Conv1DAutoencoder
-from src.autoencoders.conv2d_ae import Conv2DAutoencoder
-from src.autoencoders.transformer_ae import TransformerAutoencoder
-from src.autoencoders.deep_mlp_ae import DeepMLPAutoencoder
+from src.common.autoencoders.elm import ELMAutoencoder
+from src.common.autoencoders.statistical_ae import StatisticalAnomaly
+from src.torch.autoencoders.conv1d_ae import Conv1DAutoencoder
+from src.torch.autoencoders.conv2d_ae import Conv2DAutoencoder
+from src.torch.autoencoders.transformer_ae import TransformerAutoencoder
+from src.torch.autoencoders.deep_mlp_ae import DeepMLPAutoencoder
+from src.torch.autoencoders.lstm_ae import LSTMAutoencoder
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +157,7 @@ class TestStatisticalAnomaly:
 
 
 # ---------------------------------------------------------------------------
-# DL Autoencoders (Conv1D, Conv2D, Transformer, DeepMLP)
+# DL Autoencoders (Conv1D, Conv2D, Transformer, DeepMLP, LSTM)
 # ---------------------------------------------------------------------------
 
 # Use small seq_len and small data to keep tests fast
@@ -307,6 +308,10 @@ class TestDeepMLPAutoencoder(_DLAutoencoderTestBase):
     ae_class = DeepMLPAutoencoder
 
 
+class TestLSTMAutoencoder(_DLAutoencoderTestBase):
+    ae_class = LSTMAutoencoder
+
+
 # ---------------------------------------------------------------------------
 # Cross-variant: anomaly sensitivity
 # ---------------------------------------------------------------------------
@@ -315,7 +320,8 @@ class TestAnomalySensitivity:
     """All DL variants must score anomalous data higher than training data."""
 
     @pytest.mark.parametrize("ae_cls", [
-        Conv1DAutoencoder, Conv2DAutoencoder, TransformerAutoencoder, DeepMLPAutoencoder
+        Conv1DAutoencoder, Conv2DAutoencoder, TransformerAutoencoder,
+        DeepMLPAutoencoder, LSTMAutoencoder
     ])
     def test_anomaly_higher_than_normal(self, ae_cls):
         train = _make_data(60, DL_N_FEATURES, seed=0)

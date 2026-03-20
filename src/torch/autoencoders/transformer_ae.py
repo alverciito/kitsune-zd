@@ -13,8 +13,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
-from ..utils import create_windows
-from ..config import EPSILON, BATCH_SIZE
+from ...common.utils import create_windows
+from ...common.config import EPSILON, BATCH_SIZE
 
 
 def _find_valid_num_heads(embed_dim: int, desired_heads: int) -> int:

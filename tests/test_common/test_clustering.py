@@ -1,10 +1,10 @@
 """Tests for clustering: CorClust, DBSCAN, KMeans."""
 import numpy as np
 import pytest
-from src.clustering import get_clustering
-from src.clustering.corclust import CorClust
-from src.clustering.dbscan_clust import DBSCANClust
-from src.clustering.kmeans_clust import KMeansClust
+from src.common.clustering import get_clustering
+from src.common.clustering.corclust import CorClust
+from src.common.clustering.dbscan_clust import DBSCANClust
+from src.common.clustering.kmeans_clust import KMeansClust
 
 
 def _feed_clusterer(clusterer, n_samples=200, n_features=20, seed=42):

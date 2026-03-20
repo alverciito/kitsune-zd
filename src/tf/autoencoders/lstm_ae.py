@@ -15,19 +15,13 @@ This module uses TensorFlow internally but exposes the same
 train/execute interface as the PyTorch autoencoders.
 """
 import os
-import sys
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TF warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 import numpy as np
 import tensorflow as tf
 
-# Allow imports from project root (tf/ is a top-level package)
-_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
-
-from src.utils import create_windows
-from src.config import EPSILON, BATCH_SIZE
+from ...common.utils import create_windows
+from ...common.config import EPSILON, BATCH_SIZE
 
 
 class LSTMModel(tf.keras.Model):
