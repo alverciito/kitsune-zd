@@ -48,10 +48,10 @@ def threshold_sweep(scores: np.ndarray, labels: np.ndarray,
         fn = np.sum((preds == 0) & (labels == 1))
         tn = np.sum((preds == 0) & (labels == 0))
 
-        precision = (tp + 1e-9) / (tp + fp + 1e-9)
-        recall = (tp + 1e-9) / (tp + fn + 1e-9)
-        f1 = 2 * precision * recall / (precision + recall + 1e-9)
-        fpr = (fp + 1e-9) / (fp + tn + 1e-9)
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
 
         f1_values[idx] = f1
         recall_values[idx] = recall
@@ -70,6 +70,56 @@ def threshold_sweep(scores: np.ndarray, labels: np.ndarray,
         'fpr_values': fpr_values,
         'precision_values': precision_values,
     }
+
+
+def windowdiff(ref: np.ndarray, hyp: np.ndarray, k: int = None) -> float:
+    """
+    WindowDiff metric for segmentation evaluation (paper Sec V-B).
+
+    Measures the fraction of windows where the number of boundaries in the
+    reference and hypothesis differ.
+
+    Args:
+        ref: Binary reference segmentation (1=boundary/attack, 0=normal).
+        hyp: Binary hypothesis segmentation (same shape as ref).
+        k: Half the mean segment size. If None, computed from ref.
+
+    Returns:
+        WindowDiff score in [0, 1]. Lower is better.
+    """
+    ref = ref.astype(np.int32)
+    hyp = hyp.astype(np.int32)
+    n = len(ref)
+
+    if k is None:
+        # Compute mean segment length from reference boundaries
+        boundaries = np.diff(ref)
+        n_boundaries = np.sum(boundaries != 0)
+        if n_boundaries == 0:
+            return 0.0
+        mean_seg_len = n / (n_boundaries + 1)
+        k = max(1, int(mean_seg_len / 2))
+
+    if k >= n:
+        return 0.0
+
+    # Count boundaries in each window of size k
+    ref_counts = np.cumsum(np.abs(np.diff(ref)))
+    hyp_counts = np.cumsum(np.abs(np.diff(hyp)))
+
+    # Pad with 0 at start for cumsum indexing
+    ref_counts = np.concatenate([[0], ref_counts])
+    hyp_counts = np.concatenate([[0], hyp_counts])
+
+    mismatches = 0
+    n_windows = n - k
+    for i in range(n_windows):
+        ref_b = ref_counts[i + k] - ref_counts[i]
+        hyp_b = hyp_counts[i + k] - hyp_counts[i]
+        if ref_b != hyp_b:
+            mismatches += 1
+
+    return mismatches / n_windows if n_windows > 0 else 0.0
 
 
 def plot_roc(results_by_variant: dict, save_path: str, attack_name: str):
@@ -122,6 +172,8 @@ def save_results(results: dict, path: str):
                 'best_recall': metrics['best_recall'],
                 'best_fpr': metrics['best_fpr'],
             }
+            if 'windowdiff' in metrics:
+                serializable[attack][variant]['windowdiff'] = metrics['windowdiff']
     os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
     with open(path, 'w') as f:
         json.dump(serializable, f, indent=2)

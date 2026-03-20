@@ -4,12 +4,9 @@ from .config import EPSILON
 
 
 def sigmoid(x: np.ndarray) -> np.ndarray:
-    """Numerically stable sigmoid."""
-    return np.where(
-        x >= 0,
-        1.0 / (1.0 + np.exp(-x)),
-        np.exp(x) / (1.0 + np.exp(x)),
-    )
+    """Numerically stable sigmoid. Clips input to avoid overflow warnings."""
+    x = np.clip(x, -500, 500)
+    return 1.0 / (1.0 + np.exp(-x))
 
 
 def normalize_minmax(x: np.ndarray, norm_min: np.ndarray, norm_max: np.ndarray) -> np.ndarray:
@@ -37,6 +34,25 @@ def create_windows(x: np.ndarray, window_size: int) -> np.ndarray:
     return np.lib.stride_tricks.as_strided(
         x, shape=(n_windows, window_size, D), strides=strides
     )
+
+
+def create_windows_ar(x: np.ndarray, window_size: int):
+    """
+    Create autoregressive windows: input = window[:-1], target = window[-1].
+
+    Args:
+        x: Input array of shape (N, D).
+        window_size: Size of each window (including the target frame).
+
+    Returns:
+        (inputs, targets) where:
+          inputs: (N - window_size + 1, window_size - 1, D)
+          targets: (N - window_size + 1, D)
+    """
+    windows = create_windows(x, window_size)
+    inputs = windows[:, :-1, :]
+    targets = windows[:, -1, :]
+    return inputs, targets
 
 
 def compute_rmse_per_sample(x: np.ndarray, z: np.ndarray) -> np.ndarray:

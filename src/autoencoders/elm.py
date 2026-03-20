@@ -24,8 +24,8 @@ class ELMAutoencoder:
     - Batch execution: normalize and reconstruct a batch, returning per-sample RMSE.
     """
 
-    def __init__(self, n_visible: int, hidden_ratio: float = 0.75,
-                 lr: float = 0.1, corruption_level: float = 0.0, seed: int = 1234):
+    def __init__(self, n_visible: int, hidden_ratio: float = 0.22,
+                 lr: float = 0.001, corruption_level: float = 0.0, seed: int = 1234):
         self.n_visible = n_visible
         self.n_hidden = max(1, int(np.ceil(n_visible * hidden_ratio)))
         self.lr = lr
@@ -93,6 +93,7 @@ class ELMAutoencoder:
 
             # Update weights
             self.W += self.lr * L_W
+            self.W_prime = self.W.T.copy()  # Bug #4 fix: keep decoder in sync
             self.h_bias += self.lr * L_h1
             self.v_bias += self.lr * L_h2
 

@@ -67,8 +67,9 @@ class Conv2DAutoencoder:
         self.seq_len = seq_len
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
 
+        torch.manual_seed(1234)
         self.model = Conv2DModel(n_visible, self.n_hidden, seq_len).to(self.device)
-        self.optimizer = torch.optim.SGD(self.model.parameters(), lr=lr)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, betas=(0.9, 0.999))
         self.criterion = nn.MSELoss()
 
         self.norm_min = None

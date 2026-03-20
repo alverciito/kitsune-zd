@@ -54,6 +54,8 @@ class CorClust:
         Returns:
             List of lists of feature indices, e.g. [[0,2,5], [1,3], [4,6,7]].
         """
+        if self.n <= 1:
+            return [list(range(self.n))]
         D = self.corr_dist()
         Z = linkage(D[np.triu_indices(self.n, 1)])
         max_clust = max(1, min(max_clust, self.n))

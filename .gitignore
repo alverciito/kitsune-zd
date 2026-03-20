@@ -5,6 +5,7 @@ __pycache__/
 dist/
 build/
 .eggs/
+.pytest_cache/
 
 # Large binary score files (regenerable)
 results/*_scores.npy
@@ -17,3 +18,14 @@ results/experiments.log
 .idea/
 .vscode/
 *.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environments
+.env
+.venv/
+env/
+venv/
