@@ -201,5 +201,48 @@ Tiempo estimado: ~48-72 horas (basado en los ~10h del subset actual).
 
 ---
 
+---
+
+## Código original TensorFlow incluido en el repo
+
+El código TensorFlow original que generó los resultados del paper se ha
+incorporado al repositorio bajo `tf_original/`. Ver `tf_original/README.md`
+para detalles de la estructura.
+
+### Correspondencia entre codebase TF y PyTorch
+
+| TF Original (`tf_original/`)                          | PyTorch (`src/`)                        |
+|--------------------------------------------------------|-----------------------------------------|
+| `src/models/kitnet.py`                                | `src/kitnet.py`                         |
+| `src/models/networks/conv1d.py`                       | `src/autoencoders/conv1d_ae.py`         |
+| `src/models/networks/conv2d.py`                       | `src/autoencoders/conv2d_ae.py`         |
+| `src/models/networks/mha.py`                          | `src/autoencoders/transformer_ae.py`    |
+| `src/models/networks/multilayer.py`                   | `src/autoencoders/deep_mlp_ae.py`       |
+| `src/models/networks/original_kitsune.py`             | `src/autoencoders/elm.py`               |
+| `src/models/networks/stdev.py`                        | `src/autoencoders/statistical_ae.py`    |
+| `src/models/networks/lstm.py`                         | `tf/lstm_ae.py` (sigue en TF)           |
+| `src/models/cluster/corrclust.py`                     | `src/clustering/corclust.py`            |
+| `src/models/cluster/dbscan.py`                        | `src/clustering/dbscan_clust.py`        |
+| `src/models/cluster/kmeans.py`                        | `src/clustering/kmeans_clust.py`        |
+| `src/models/utils/sequential.py`                      | `src/utils.py`                          |
+| `src/models/oopsie.py` (NETWORK_TYPES)                | `src/kitnet.py` (inline)                |
+| `experiments/frames/launch_all.py`                    | `run_experiments.py`                    |
+| *(no existía)*                                         | `src/detectors/centroid.py` (KMD)       |
+| *(no existía)*                                         | `src/detectors/distribution.py` (MVD)   |
+
+### Datos de resultados originales (no en repo, ~24 GB)
+
+Ubicación en el servidor:
+```
+/mnt/hdd8tb/backup/acid137/PythonProjects/anomaly/experiments/frames/
+├── kitsune/results/       # 13 GB - KNAD (6 ataques × 14 variantes)
+├── CIC2017/results/       #  2.6 GB - CIC-IDS-2017
+├── CIC2018/results/       #  5.6 GB - CIC-IDS-2018
+├── CIC2019/results/       #  2.2 GB - CIC-IDS-2019
+└── ACI-IOT-2023/results/  #  1.4 GB - ACI-IoT-2023
+```
+
+---
+
 *Informe generado el 2026-03-20.*
 *Datos del servidor: acid137@srv (GPU, /mnt/hdd8tb/database/).*
