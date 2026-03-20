@@ -6,6 +6,6 @@ from .deep_mlp_ae import DeepMLPAutoencoder
 from .statistical_ae import StatisticalAnomaly
 
 try:
-    from .lstm_ae import LSTMAutoencoder
+    from tf.lstm_ae import LSTMAutoencoder
 except ImportError:
     LSTMAutoencoder = None

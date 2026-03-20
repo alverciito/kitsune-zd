@@ -26,7 +26,7 @@ from .autoencoders.transformer_ae import TransformerAutoencoder
 from .autoencoders.conv2d_ae import Conv2DAutoencoder
 from .autoencoders.deep_mlp_ae import DeepMLPAutoencoder
 try:
-    from .autoencoders.lstm_ae import LSTMAutoencoder
+    from tf.lstm_ae import LSTMAutoencoder
 except ImportError:
     LSTMAutoencoder = None
 from .autoencoders.statistical_ae import StatisticalAnomaly

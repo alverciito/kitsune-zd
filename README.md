@@ -43,7 +43,7 @@ Phase 3 — Execution  (remaining samples)
 | `conv2d`      | Conv2d(1→8→16, 3×3) → AdaptivePool → Dense → Dense        | PyTorch    |
 | `transformer` | MHA → Dense(σ) → Dense(relu) → MHA                        | PyTorch    |
 | `deep_mlp`    | Flatten → Linear(//4) → Linear(h) → Linear(//4) → Reshape | PyTorch    |
-| `lstm`        | LSTM(n_h) → Dense(relu) → Dense(sigmoid)                  | TensorFlow |
+| `lstm`        | LSTM(n_h) → Dense(relu) → Dense(sigmoid)                  | TensorFlow (see `tf/`) |
 
 All windowed variants support both **TSR** (reconstruct the window) and **AR** (predict next frame). Append `_ar` to the variant name for autoregressive mode (e.g. `lstm_ar`).
 
@@ -133,7 +133,7 @@ kitsune-zd/
 │   │   ├── conv2d_ae.py           # Conv2D                  (PyTorch)
 │   │   ├── transformer_ae.py      # Transformer MHA         (PyTorch)
 │   │   ├── deep_mlp_ae.py         # Deep MLP                (PyTorch)
-│   │   └── lstm_ae.py             # LSTM encoder-decoder    (TensorFlow)
+│   │   └── (lstm moved to tf/)     # See tf/ for TensorFlow models
 │   ├── clustering/
 │   │   ├── __init__.py            # get_clustering() factory
 │   │   ├── corclust.py            # Incremental correlation
@@ -144,6 +144,10 @@ kitsune-zd/
 │       ├── centroid.py            # CentroidDetector (K-means++)
 │       ├── distribution.py        # DistributionDetector (Eq. 4)
 │       └── filters.py             # mean_filter, median_filter
+├── tf/                               # TensorFlow models (optional dependency)
+│   ├── __init__.py
+│   ├── lstm_ae.py                 # LSTM encoder-decoder    (TensorFlow/Keras)
+│   └── requirements.txt           # pip install -r tf/requirements.txt
 ├── tests/
 │   ├── __init__.py
 │   ├── test_utils.py              # Windowing, normalization, sigmoid

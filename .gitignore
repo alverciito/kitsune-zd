@@ -24,6 +24,12 @@ results/experiments.log
 .DS_Store
 Thumbs.db
 
+# Large model files (not for git)
+*.h5
+*.hdf5
+model.pkl
+original_*.pkl
+
 # Environments
 .env
 .venv/
