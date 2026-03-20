@@ -15,39 +15,67 @@ from ..config import EPSILON
 
 
 class DistributionDetector:
-    """
-    Detect anomalies by comparing local score distribution to training distribution.
+    """Mean-Variance Distance (MVD) anomaly detector from Section IV-D / Eq. 4.
 
-    Args:
-        window_size: Sliding window size for computing local statistics.
-        filter_window: Window size for median filter smoothing (0 = no filter).
+    Detects anomalies by comparing the local (sliding-window) score
+    distribution to the global training distribution using a harmonic-mean
+    distance measure. The score captures both mean shift and variance change,
+    making it robust to different attack profiles.
+
+    Attributes:
+        window_size: Size of the sliding window W for computing local
+            statistics (mu_d, sigma_d).
+        filter_window: Window size for post-hoc median filter smoothing.
+        mu_T: Mean of the training-phase anomaly scores (set by train()).
+        sigma_T: Std of the training-phase anomaly scores (set by train()).
     """
 
     def __init__(self, window_size: int = 10_000, filter_window: int = 100):
+        """Initialize the distribution-based detector.
+
+        Args:
+            window_size: Sliding window size W for computing local statistics
+                (int). Default 10,000 packets per the paper.
+            filter_window: Window size for the sliding median filter (int).
+                Set to 0 to disable smoothing.
+        """
         self.window_size = window_size
         self.filter_window = filter_window
         self.mu_T = None
         self.sigma_T = None
 
     def train(self, scores: np.ndarray):
-        """
-        Compute training distribution statistics.
+        """Compute global training distribution statistics (mu_T, sigma_T).
+
+        These reference statistics are used during execution to measure how
+        much the local score distribution deviates from normal behavior.
 
         Args:
-            scores: 1D array of anomaly scores from training/detection frame.
+            scores: 1D array of anomaly scores from the Detection Frame
+                (training/calibration phase). Shape (N,).
         """
         self.mu_T = np.mean(scores)
         self.sigma_T = np.std(scores)
 
     def execute(self, scores: np.ndarray) -> np.ndarray:
-        """
-        Score new data using Eq. 4 harmonic-mean deviation.
+        """Score new data using the harmonic-mean deviation measure (Eq. 4).
+
+        For each position i, computes local statistics (mu_d, sigma_d) over
+        the sliding window [i-W+1, i], then applies the harmonic-mean
+        distance formula:
+            D(x,t) = 2 * (mu_T - mu_d)^2 * (sigma_T - sigma_d)^2
+                     / ((mu_T - mu_d)^2 + (sigma_T - sigma_d)^2 + eps)
+
+        A median filter is then applied for temporal smoothing.
 
         Args:
-            scores: 1D array of raw anomaly scores.
+            scores: 1D array of raw anomaly scores from the execution phase.
+                Shape (N,).
 
         Returns:
-            Filtered distribution deviation scores.
+            np.ndarray: Filtered harmonic-mean deviation scores of shape (N,).
+                Higher values indicate greater distributional shift from
+                training behavior.
         """
         n = len(scores)
         result = np.zeros(n)

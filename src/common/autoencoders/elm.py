@@ -16,16 +16,52 @@ from ..config import EPSILON
 
 
 class ELMAutoencoder:
-    """
-    Pure numpy denoising autoencoder with online SGD.
+    """Pure-numpy denoising autoencoder with online SGD, based on Kitsune (NDSS'18).
 
-    Supports two modes:
-    - Online training: process samples one-by-one, updating norms incrementally.
-    - Batch execution: normalize and reconstruct a batch, returning per-sample RMSE.
+    Implements a single-hidden-layer autoencoder with tied weights, sigmoid
+    activations, and optional input corruption (denoising). Training uses
+    sample-by-sample online SGD with incremental min-max normalization.
+
+    Architecture (Section III-A of the paper):
+        input -> sigmoid(W * x + b_h) -> sigmoid(W' * h + b_v) -> output
+
+    This class serves dual purposes in the KitNET pipeline:
+    1. As an ensemble-layer autoencoder that reconstructs a subset of features.
+    2. As the output-layer autoencoder that aggregates per-AE RMSE scores.
+
+    Bug Fix #4: The decoder weight matrix W' is kept in sync with the
+    encoder W after each gradient update (W' = W^T).
+
+    Attributes:
+        n_visible: Number of input/output neurons.
+        n_hidden: Number of hidden neurons, computed as ceil(n_visible * hidden_ratio).
+        lr: Learning rate for SGD updates.
+        corruption_level: Fraction of inputs zeroed out for denoising (0.0 = none).
+        norm_max: Per-feature maximum values learned during training.
+        norm_min: Per-feature minimum values learned during training.
+        W: Encoder weight matrix of shape (n_visible, n_hidden).
+        W_prime: Decoder weight matrix of shape (n_hidden, n_visible).
+        h_bias: Hidden layer bias of shape (n_hidden,).
+        v_bias: Visible layer bias of shape (n_visible,).
+        n_trained: Count of samples processed during training.
     """
 
     def __init__(self, n_visible: int, hidden_ratio: float = 0.22,
                  lr: float = 0.001, corruption_level: float = 0.0, seed: int = 1234):
+        """Initialize the ELM autoencoder with Xavier-uniform weights.
+
+        Args:
+            n_visible: Number of input features (visible units). For ensemble
+                AEs this equals the cluster size; for the output AE this
+                equals the number of ensemble AEs.
+            hidden_ratio: Ratio of hidden units to visible units (float).
+                Default 0.22 per Table II (78% compression).
+            lr: Learning rate for online SGD (float). Default 0.001 per Table II.
+            corruption_level: Fraction of inputs to zero out during training
+                for denoising (float in [0, 1]). Default 0.0 (no corruption).
+            seed: Random seed for weight initialization and corruption mask
+                generation (int).
+        """
         self.n_visible = n_visible
         self.n_hidden = max(1, int(np.ceil(n_visible * hidden_ratio)))
         self.lr = lr
@@ -46,21 +82,57 @@ class ELMAutoencoder:
         self.n_trained = 0
 
     def _encode(self, x: np.ndarray) -> np.ndarray:
+        """Encode input to hidden representation: h = sigmoid(W * x + b_h).
+
+        Args:
+            x: Input vector of shape (n_visible,) or batch (N, n_visible).
+
+        Returns:
+            np.ndarray: Hidden representation of shape (n_hidden,) or (N, n_hidden).
+        """
         return sigmoid(np.dot(x, self.W) + self.h_bias)
 
     def _decode(self, h: np.ndarray) -> np.ndarray:
+        """Decode hidden representation to reconstruction: z = sigmoid(W' * h + b_v).
+
+        Args:
+            h: Hidden vector of shape (n_hidden,) or batch (N, n_hidden).
+
+        Returns:
+            np.ndarray: Reconstructed input of shape (n_visible,) or (N, n_visible).
+        """
         return sigmoid(np.dot(h, self.W_prime) + self.v_bias)
 
     def _reconstruct(self, x: np.ndarray) -> np.ndarray:
+        """Full forward pass: encode then decode.
+
+        Args:
+            x: Input vector of shape (n_visible,) or batch (N, n_visible).
+
+        Returns:
+            np.ndarray: Reconstruction of the same shape as x.
+        """
         return self._decode(self._encode(x))
 
     def train(self, data: np.ndarray) -> np.ndarray:
-        """
-        Train on data of shape (N, n_visible) using online SGD.
-        Updates normalization bounds incrementally per sample.
+        """Train on data using sample-by-sample online SGD.
+
+        For each sample: (1) updates incremental min-max normalization bounds,
+        (2) normalizes to [0,1], (3) optionally applies corruption mask,
+        (4) performs forward pass, (5) computes gradients via backpropagation,
+        and (6) updates weights and biases.
+
+        The gradient computation follows the tied-weight denoising autoencoder
+        formulation from the original Kitsune (NDSS'18) paper.
+
+        Args:
+            data: Training data of shape (N, n_visible) or (n_visible,) for
+                a single sample. Each row is one packet's feature vector.
 
         Returns:
-            Per-sample RMSE array of shape (N,).
+            np.ndarray: Per-sample RMSE array of shape (N,), measuring
+                reconstruction error during training. Useful for monitoring
+                convergence.
         """
         if data.ndim == 1:
             data = data.reshape(1, -1)
@@ -102,9 +174,19 @@ class ELMAutoencoder:
         return rmse_list
 
     def execute(self, data: np.ndarray) -> np.ndarray:
-        """
-        Score data of shape (N, n_visible). Returns per-sample RMSE of shape (N,).
-        Uses learned normalization bounds (frozen after training).
+        """Score data by computing reconstruction RMSE (inference/execution phase).
+
+        Normalizes input using the min-max bounds learned during training
+        (frozen), reconstructs via the encoder-decoder, and returns the
+        per-sample RMSE as the anomaly score. Higher scores indicate greater
+        deviation from learned normal behavior.
+
+        Args:
+            data: Input data of shape (N, n_visible) or (n_visible,) for a
+                single sample.
+
+        Returns:
+            np.ndarray: Per-sample RMSE anomaly scores of shape (N,).
         """
         if data.ndim == 1:
             data = data.reshape(1, -1)

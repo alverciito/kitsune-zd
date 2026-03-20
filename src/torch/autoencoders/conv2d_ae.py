@@ -19,7 +19,35 @@ from ...common.config import EPSILON, BATCH_SIZE
 
 
 class Conv2DModel(nn.Module):
-    """Conv2D autoencoder: treats (seq_len, n_visible) as a 1-channel image."""
+    """Conv2D encoder-decoder treating packet windows as single-channel images.
+
+    Architecture (Section III-C of the paper):
+        Encoder:
+            Conv2d(1, 8, kernel_size=3, padding=1) + ReLU
+            -> Conv2d(8, 16, kernel_size=3, padding=1) + ReLU
+            -> AdaptiveAvgPool2d(1) -> flatten to (batch, 16)
+            -> Linear(16, n_hidden) + ReLU
+        Decoder:
+            Linear(n_hidden, 16) + ReLU
+            -> Linear(16, seq_len * n_visible)
+            -> reshape to (batch, seq_len, n_visible)
+
+    Each ``(seq_len, n_visible)`` sliding window is treated as a
+    single-channel 2D image. The encoder extracts spatial features
+    via convolutions, compresses through adaptive pooling, and maps
+    to a bottleneck. The decoder reconstructs the full window from
+    the bottleneck via fully-connected layers.
+
+    Input shape:
+        ``(batch, seq_len, n_visible)`` - batch of sliding windows.
+    Output shape:
+        ``(batch, seq_len, n_visible)`` - reconstructed windows.
+
+    Args:
+        n_visible: Number of input features per timestep (image width).
+        n_hidden: Bottleneck dimensionality.
+        seq_len: Window length in timesteps (image height).
+    """
 
     def __init__(self, n_visible: int, n_hidden: int, seq_len: int):
         super().__init__()
@@ -37,6 +65,19 @@ class Conv2DModel(nn.Module):
         self.dec_fc2 = nn.Linear(16, seq_len * n_visible)
 
     def forward(self, x):
+        """Forward pass: encode the 2D window and decode to reconstruct it.
+
+        Adds a channel dimension, applies two convolutional layers with
+        adaptive pooling, projects through the bottleneck, and reshapes
+        the decoder output back to the original window dimensions.
+
+        Args:
+            x: Input tensor of shape ``(batch, seq_len, n_visible)``.
+
+        Returns:
+            torch.Tensor: Reconstructed tensor of shape
+                ``(batch, seq_len, n_visible)``.
+        """
         # x: (batch, seq_len, n_visible) -> add channel dim
         b = x.shape[0]
         h = x.unsqueeze(1)                        # (batch, 1, seq_len, n_visible)
@@ -55,9 +96,29 @@ class Conv2DModel(nn.Module):
 
 
 class Conv2DAutoencoder:
-    """
-    Wrapper matching the Conv1D/Transformer interface.
-    Same windowing, normalization, and train/execute protocol.
+    """Windowed Conv2D autoencoder with online normalization.
+
+    Wraps Conv2DModel with sliding-window preprocessing, incremental
+    min-max normalization, and back_window continuity for streaming
+    execution across chunks. Each ``(seq_len, n_visible)`` window is
+    treated as a single-channel 2D image for convolution.
+
+    Follows the same windowing, normalization, and train/execute protocol
+    as Conv1DAutoencoder and TransformerAutoencoder.
+
+    Training procedure:
+        1. Compute per-feature min/max from training data.
+        2. Normalize to [0, 1] via min-max scaling.
+        3. Create sliding windows of shape ``(N - seq_len + 1, seq_len, n_visible)``.
+        4. Train Conv2DModel for 1 epoch with shuffled DataLoader (Adam, MSE loss).
+        5. Evaluate without shuffle to produce ordered per-window RMSE.
+
+    Args:
+        n_visible: Number of input features per packet.
+        hidden_ratio: Compression ratio for bottleneck size (default: 0.75).
+        lr: Learning rate for Adam optimizer (default: 0.001).
+        seq_len: Sliding window length in packets (default: 500).
+        device: PyTorch device string ('cuda' or 'cpu').
     """
 
     def __init__(self, n_visible: int, hidden_ratio: float = 0.75,
@@ -77,10 +138,29 @@ class Conv2DAutoencoder:
         self.back_window = None
 
     def _normalize(self, x: np.ndarray) -> np.ndarray:
+        """Apply min-max normalization to scale features to [0, 1].
+
+        Args:
+            x: Input array of shape ``(N, n_visible)``.
+
+        Returns:
+            np.ndarray: Normalized array of same shape, values in [0, 1].
+        """
         return (x - self.norm_min) / (self.norm_max - self.norm_min + EPSILON)
 
     def train(self, data: np.ndarray) -> np.ndarray:
-        """Train on (N, n_visible). Returns per-window RMSE of shape (N - seq_len + 1,)."""
+        """Train the Conv2D model on a batch of packet features.
+
+        Computes per-feature min/max, normalizes, creates sliding windows,
+        trains for 1 epoch with shuffled DataLoader, then evaluates without
+        shuffle. Saves back_window for execution continuity.
+
+        Args:
+            data: Training data of shape ``(N, n_visible)``.
+
+        Returns:
+            np.ndarray: Per-window RMSE of shape ``(N - seq_len + 1,)``.
+        """
         self.norm_max = np.max(data, axis=0)
         self.norm_min = np.min(data, axis=0)
         x_norm = self._normalize(data).astype(np.float32)
@@ -113,7 +193,19 @@ class Conv2DAutoencoder:
         return np.concatenate(rmse_list)
 
     def execute(self, data: np.ndarray) -> np.ndarray:
-        """Score data of shape (N, n_visible). Returns per-sample RMSE."""
+        """Score new data using the trained Conv2D model.
+
+        Normalizes input, prepends the saved back_window for sliding-window
+        continuity, computes per-window RMSE without shuffle, and trims
+        output to match input length. Updates back_window for subsequent calls.
+
+        Args:
+            data: Input data of shape ``(N, n_visible)``.
+
+        Returns:
+            np.ndarray: Per-sample RMSE scores of shape ``(N,)``.
+                Returns zeros if extended data is shorter than seq_len.
+        """
         x_norm = self._normalize(data).astype(np.float32)
 
         if self.back_window is not None:

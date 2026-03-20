@@ -28,7 +28,27 @@ from ...common.config import EPSILON, BATCH_SIZE
 
 
 class _Conv2DModel(tf.keras.Model):
-    """Conv2D autoencoder from tf_original architecture."""
+    """TensorFlow Conv2D autoencoder model from the tf_original architecture.
+
+    Architecture (matching tf_original/src/models/networks/conv2d.py):
+        Encoder: Reshape(seq_len, n_visible, 1) ->
+                 Conv2D(32, kernel_size=(3,3), tanh) ->
+                 MaxPooling2D((2,2)) ->
+                 Conv2D(n_hidden, kernel_size=(3,3), relu) ->
+                 GlobalAveragePooling2D -> Dense(n_hidden, relu)
+        Decoder: Dense(n_hidden, relu) -> Dense(n_visible, sigmoid)
+
+    The input is reshaped from ``(batch, seq_len, n_visible)`` to
+    ``(batch, seq_len, n_visible, 1)`` to treat the feature-time matrix
+    as a single-channel 2-D image. This differs from the PyTorch version
+    which treats the window as a 1-D signal; the 2-D approach captures
+    spatial correlations across both the time and feature axes.
+
+    Args:
+        n_visible: Number of input features per time step.
+        n_hidden: Bottleneck dimensionality.
+        seq_len: Sliding-window length (number of time steps).
+    """
 
     def __init__(self, n_visible: int, n_hidden: int, seq_len: int):
         super().__init__()
@@ -50,17 +70,51 @@ class _Conv2DModel(tf.keras.Model):
         ], name='decoder')
 
     def call(self, x):
+        """Forward pass: encode the 2-D feature-time image then decode to a single frame.
+
+        Args:
+            x: Input tensor of shape ``(batch, seq_len, n_visible)``.
+                Internally reshaped to ``(batch, seq_len, n_visible, 1)``.
+
+        Returns:
+            Tensor of shape ``(batch, n_visible)`` -- reconstructed (or
+            predicted) single frame.
+        """
         encoded = self.encoder(x)
         decoded = self.decoder(encoded)
         return decoded
 
 
 class Conv2DAutoencoder:
-    """
-    Wrapper matching the PyTorch Conv2DAutoencoder interface.
+    """TensorFlow Conv2D windowed autoencoder.
 
-    Uses TensorFlow internally. Handles normalization, windowing,
-    training and evaluation with the same API as PyTorch variants.
+    Architecture from the original paper implementation:
+        Encoder: Reshape to (seq_len, n_visible, 1) ->
+                 Conv2D(32, (3,3), tanh) -> MaxPooling2D((2,2)) ->
+                 Conv2D(n_hidden, (3,3), relu) -> GlobalAveragePooling2D ->
+                 Dense(n_hidden, relu)
+        Decoder: Dense(n_hidden, relu) -> Dense(n_visible, sigmoid)
+
+    Note: Architecture differs from the PyTorch version which does not
+    have a Conv2D variant. This TF-only model treats the sliding window
+    as a 2-D single-channel image, enabling spatial convolutions across
+    both time and feature dimensions.
+
+    Handles min-max normalization, sliding-window construction, Keras
+    model training, and RMSE scoring. Exposes the same ``train()`` /
+    ``execute()`` contract as the PyTorch autoencoder variants so that
+    ``KitNET`` can use either backend interchangeably.
+
+    Args:
+        n_visible: Number of input features per packet.
+        hidden_ratio: Compression ratio for the bottleneck layer
+            (default: 0.75, Table II).
+        lr: Learning rate for the Adam optimizer (default: 0.001).
+        seq_len: Sliding-window length in packets (default: 500).
+        ar: If True, use autoregressive windowing -- predict the *next*
+            frame instead of reconstructing the *last* frame.
+        device: Ignored (kept for API compatibility with PyTorch backend).
+        **kwargs: Absorbed silently for forward-compatible construction.
     """
 
     def __init__(self, n_visible: int, hidden_ratio: float = 0.75,
@@ -83,13 +137,33 @@ class Conv2DAutoencoder:
         self.back_window = None
 
     def _normalize(self, x: np.ndarray) -> np.ndarray:
+        """Apply min-max normalization using statistics stored during training.
+
+        Args:
+            x: Array of shape ``(N, n_visible)``.
+
+        Returns:
+            np.ndarray: Normalized array with values in roughly [0, 1].
+        """
         return (x - self.norm_min) / (self.norm_max - self.norm_min + EPSILON)
 
     def _make_windows_and_targets(self, x_norm: np.ndarray):
-        """
-        Create (window, target) pairs.
-        - TSR mode (ar=False): window = x[i:i+seq_len], target = x[i+seq_len-1] (last frame)
-        - AR mode (ar=True): window = x[i:i+seq_len], target = x[i+seq_len] (next frame)
+        """Create sliding-window input/target pairs from normalized data.
+
+        Two modes are supported:
+          * **TSR** (``ar=False``): window = ``x[i:i+seq_len]``,
+            target = ``x[i+seq_len-1]`` (reconstruct last frame).
+          * **AR** (``ar=True``): window = ``x[i:i+seq_len]``,
+            target = ``x[i+seq_len]`` (predict next frame).
+
+        Args:
+            x_norm: Normalized data of shape ``(T, n_visible)``.
+
+        Returns:
+            Tuple of ``(windows, targets)`` where *windows* has shape
+            ``(n_windows, seq_len, n_visible)`` and *targets* has shape
+            ``(n_windows, n_visible)``. Returns empty arrays if the
+            input is too short.
         """
         if self.ar:
             n_samples = len(x_norm) - self.seq_len
@@ -106,9 +180,21 @@ class Conv2DAutoencoder:
             return windows[:min_len], targets[:min_len]
 
     def train(self, data: np.ndarray) -> np.ndarray:
-        """
-        Train on data of shape (N, n_visible).
-        Returns: Per-window RMSE array.
+        """Fit the autoencoder on training data and return per-window RMSE.
+
+        Computes and stores min-max normalization statistics, constructs
+        sliding windows, trains the Keras model for one epoch, and
+        evaluates reconstruction error on the training windows. Also
+        saves the trailing ``seq_len - 1`` frames as ``back_window`` for
+        seamless continuity when ``execute()`` is called later.
+
+        Args:
+            data: Training data of shape ``(N, n_visible)``.
+
+        Returns:
+            np.ndarray: Per-window RMSE array of shape ``(n_windows,)``.
+            Returns an empty array if the data is too short to form any
+            window.
         """
         self.norm_max = np.max(data, axis=0)
         self.norm_min = np.min(data, axis=0)
@@ -130,9 +216,23 @@ class Conv2DAutoencoder:
         return rmse
 
     def execute(self, data: np.ndarray) -> np.ndarray:
-        """
-        Score data of shape (N, n_visible). Returns per-sample RMSE.
-        Prepends saved back_window for sliding window continuity.
+        """Score new data using the trained autoencoder.
+
+        Normalizes the input, prepends the saved ``back_window`` from
+        the previous call (training or execution) to maintain sliding-
+        window continuity, constructs windows, and computes per-window
+        RMSE. The returned array is aligned to the *input* batch: if
+        more RMSE values are produced than input rows, only the last
+        ``len(data)`` values are returned.
+
+        Args:
+            data: Execution data of shape ``(N, n_visible)``.
+
+        Returns:
+            np.ndarray: Per-sample RMSE array. Shape is at most
+            ``(N,)``; may be shorter if the extended sequence is too
+            short to form full windows. Returns zeros if no windows
+            can be formed.
         """
         x_norm = self._normalize(data).astype(np.float32)
 

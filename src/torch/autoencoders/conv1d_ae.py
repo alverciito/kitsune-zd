@@ -20,7 +20,28 @@ from ...common.config import EPSILON, BATCH_SIZE
 
 
 class Conv1DModel(nn.Module):
-    """Conv1D autoencoder model. Reconstructs windowed input sequences."""
+    """Conv1D encoder-decoder for windowed anomaly detection.
+
+    Architecture (Section III-C of the paper):
+        Encoder: Conv1D(n_visible, 3, kernel_size=seq_len, padding='same') + ReLU
+                 -> Linear(3, n_hidden) + ReLU
+        Decoder: Linear(n_hidden, n_visible) + ReLU
+
+    The Conv1D layer operates along the temporal axis, compressing
+    ``n_visible`` input channels to 3 intermediate channels at each
+    timestep. The dense layers then reduce to the bottleneck and
+    reconstruct the original feature dimensionality.
+
+    Input shape:
+        ``(batch, seq_len, n_visible)`` - a batch of sliding windows.
+    Output shape:
+        ``(batch, seq_len, n_visible)`` - reconstructed windows.
+
+    Args:
+        n_visible: Number of input features per timestep.
+        n_hidden: Bottleneck dimensionality (typically ``ceil(n_visible * hidden_ratio)``).
+        seq_len: Length of the input sliding window in timesteps.
+    """
 
     def __init__(self, n_visible: int, n_hidden: int, seq_len: int):
         super().__init__()
@@ -31,6 +52,19 @@ class Conv1DModel(nn.Module):
         self.dense2 = nn.Linear(n_hidden, n_visible)
 
     def forward(self, x):
+        """Forward pass: encode then decode the input window.
+
+        Permutes input to channels-first for Conv1D, applies the
+        encoder (conv + dense), then decodes back to the original
+        feature space.
+
+        Args:
+            x: Input tensor of shape ``(batch, seq_len, n_visible)``.
+
+        Returns:
+            torch.Tensor: Reconstructed tensor of shape
+                ``(batch, seq_len, n_visible)``.
+        """
         # x: (batch, seq_len, n_visible)
         x = x.permute(0, 2, 1)       # -> (batch, n_visible, seq_len)
         x = F.relu(self.conv(x))      # -> (batch, 3, seq_len)
@@ -41,11 +75,36 @@ class Conv1DModel(nn.Module):
 
 
 class Conv1DAutoencoder:
-    """
-    Wrapper matching the ELMAutoencoder interface.
+    """Windowed Conv1D autoencoder with online normalization.
 
-    Handles normalization, windowing, training (with shuffle) and evaluation
-    (WITHOUT shuffle - Bug #2 fix).
+    Wraps Conv1DModel with sliding-window preprocessing, incremental
+    min-max normalization, and back_window continuity for streaming
+    execution across chunks. Uses temporal sequence reconstruction (TSR)
+    windowing: each window ``x[i:i+seq_len]`` is reconstructed in full.
+
+    Training procedure:
+        1. Compute per-feature min/max from training data.
+        2. Normalize to [0, 1] via min-max scaling.
+        3. Create sliding windows of shape ``(N - seq_len + 1, seq_len, n_visible)``.
+        4. Train Conv1DModel for 1 epoch with shuffled DataLoader (Adam, MSE loss).
+        5. Evaluate without shuffle to produce ordered per-window RMSE.
+
+    Execution procedure:
+        1. Normalize using stored min/max.
+        2. Prepend ``back_window`` (last ``seq_len - 1`` samples from previous
+           call) for sliding-window continuity across chunk boundaries.
+        3. Score windows without shuffle; return last ``N`` RMSE values.
+        4. Save new ``back_window`` for the next call.
+
+    Bug Fix #2: Evaluation DataLoader never shuffles, ensuring RMSE
+    ordering matches the original sample order.
+
+    Args:
+        n_visible: Number of input features per packet.
+        hidden_ratio: Compression ratio for bottleneck size (default: 0.75).
+        lr: Learning rate for Adam optimizer (default: 0.001).
+        seq_len: Sliding window length in packets (default: 500).
+        device: PyTorch device string ('cuda' or 'cpu').
     """
 
     def __init__(self, n_visible: int, hidden_ratio: float = 0.75,
@@ -67,18 +126,42 @@ class Conv1DAutoencoder:
         self.back_window = None
 
     def _normalize(self, x: np.ndarray) -> np.ndarray:
+        """Apply min-max normalization to scale features to [0, 1].
+
+        Uses the per-feature min/max values computed during training.
+        A small epsilon is added to the denominator to avoid division
+        by zero for constant features.
+
+        Args:
+            x: Input array of shape ``(N, n_visible)``.
+
+        Returns:
+            np.ndarray: Normalized array of same shape, values in [0, 1].
+        """
         return (x - self.norm_min) / (self.norm_max - self.norm_min + EPSILON)
 
     def train(self, data: np.ndarray) -> np.ndarray:
-        """
-        Train on data of shape (N, n_visible).
-        1. Compute min/max norms
-        2. Normalize to [0,1]
-        3. Create sliding windows
-        4. Train model for 1 epoch WITH shuffled DataLoader
-        5. Evaluate WITHOUT shuffle -> per-window RMSE
+        """Train the Conv1D model on a batch of packet features.
 
-        Returns: Per-window RMSE array of shape (N - seq_len + 1,).
+        Performs the full training pipeline:
+            1. Compute and store per-feature min/max for normalization.
+            2. Normalize data to [0, 1].
+            3. Create sliding windows of shape
+               ``(N - seq_len + 1, seq_len, n_visible)``.
+            4. Train the model for 1 epoch using a shuffled DataLoader
+               with Adam optimizer and MSE loss.
+            5. Evaluate (without shuffle) to compute per-window RMSE.
+            6. Save the last ``seq_len - 1`` normalized samples as
+               ``back_window`` for execution continuity.
+
+        Args:
+            data: Training data of shape ``(N, n_visible)`` where N is
+                the number of packets and n_visible is the feature count.
+
+        Returns:
+            np.ndarray: Per-window RMSE array of shape
+                ``(N - seq_len + 1,)``, representing reconstruction
+                error for each sliding window position.
         """
         # Compute and store norms
         self.norm_max = np.max(data, axis=0)
@@ -117,13 +200,28 @@ class Conv1DAutoencoder:
         return np.concatenate(rmse_list)
 
     def execute(self, data: np.ndarray) -> np.ndarray:
-        """
-        Score data of shape (N, n_visible). Returns per-sample RMSE.
+        """Score new data using the trained Conv1D model.
 
-        Prepends saved back_window for sliding window continuity,
-        so output length == N (not N - seq_len + 1).
+        Normalizes the input using stored min/max, prepends the saved
+        ``back_window`` from the previous train/execute call to maintain
+        sliding-window continuity, then computes per-window RMSE without
+        shuffling. The output is trimmed to exactly ``N`` scores
+        (matching the input length) by discarding leading entries that
+        correspond to the prepended back_window.
 
-        BUG FIX #2: NO shuffle during evaluation.
+        After scoring, saves the last ``seq_len - 1`` normalized samples
+        as the new ``back_window`` for subsequent calls.
+
+        Bug Fix #2: The evaluation DataLoader never shuffles, ensuring
+        RMSE values are aligned with their original sample positions.
+
+        Args:
+            data: Input data of shape ``(N, n_visible)``.
+
+        Returns:
+            np.ndarray: Per-sample RMSE scores of shape ``(N,)``.
+                Returns zeros if the extended data (back_window + data)
+                is shorter than ``seq_len``.
         """
         x_norm = self._normalize(data).astype(np.float32)
 

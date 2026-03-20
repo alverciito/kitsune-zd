@@ -1,5 +1,9 @@
 """
-Anomaly detection metrics: threshold sweep, F1, ROC, and plotting.
+Anomaly detection evaluation: threshold sweep, F1, ROC, and plotting.
+
+Provides threshold-sweeping over anomaly scores to compute precision, recall,
+F1, and FPR metrics; a WindowDiff segmentation metric (Section V-B); ROC
+plotting; and JSON result serialization.
 
 BUG FIX #1: Every call to threshold_sweep returns and stores fresh results.
 The original code failed to capture the return value for elm_reg, reusing
@@ -15,19 +19,34 @@ import matplotlib.pyplot as plt
 
 def threshold_sweep(scores: np.ndarray, labels: np.ndarray,
                     n_thresholds: int = 5000) -> dict:
-    """
-    Sweep thresholds over anomaly scores and compute detection metrics.
+    """Sweep thresholds over anomaly scores and compute detection metrics.
 
-    Uses log-space scores and percentile-based thresholds for better coverage.
+    Applies a log transform to raw anomaly scores (matching the original
+    Kitsune evaluation protocol), then evaluates ``n_thresholds`` linearly
+    spaced thresholds in [-30, 200]. For each threshold, computes precision,
+    recall, F1, and FPR. Returns the threshold that maximizes F1.
+
+    This is the primary evaluation function used in Section V of the paper
+    for reporting best-F1 detection results per attack.
 
     Args:
-        scores: Anomaly scores from KitNET execution phase.
-        labels: Binary ground truth (0=benign, 1=attack).
-        n_thresholds: Number of threshold values to try.
+        scores: 1D array of raw anomaly scores from the KitNET execution
+            phase. Shape (N,).
+        labels: 1D binary ground-truth array (0=benign, 1=attack). Shape (N,).
+        n_thresholds: Number of threshold values to evaluate (int). Higher
+            values give finer granularity at the cost of compute time.
 
     Returns:
-        Dict with keys: best_f1, best_threshold, best_recall, best_fpr,
-        and arrays: thresholds, f1_values, recall_values, fpr_values.
+        dict: Dictionary containing:
+            - 'best_f1' (float): Maximum F1 score across all thresholds.
+            - 'best_threshold' (float): Log-space threshold achieving best F1.
+            - 'best_recall' (float): Recall (TPR) at best F1 threshold.
+            - 'best_fpr' (float): False positive rate at best F1 threshold.
+            - 'thresholds' (np.ndarray): All evaluated threshold values.
+            - 'f1_values' (np.ndarray): F1 at each threshold.
+            - 'recall_values' (np.ndarray): Recall at each threshold.
+            - 'fpr_values' (np.ndarray): FPR at each threshold.
+            - 'precision_values' (np.ndarray): Precision at each threshold.
     """
     # Apply log transform (matches original code)
     log_scores = np.log(scores + 1e-9)
@@ -73,19 +92,27 @@ def threshold_sweep(scores: np.ndarray, labels: np.ndarray,
 
 
 def windowdiff(ref: np.ndarray, hyp: np.ndarray, k: int = None) -> float:
-    """
-    WindowDiff metric for segmentation evaluation (paper Sec V-B).
+    """Compute the WindowDiff metric for segmentation evaluation.
 
-    Measures the fraction of windows where the number of boundaries in the
-    reference and hypothesis differ.
+    Implements the WindowDiff metric described in Section V-B of the paper.
+    Measures the fraction of sliding windows in which the number of
+    segment boundaries in the reference differs from the hypothesis. This
+    captures both false alarms and missed detections in a boundary-aware
+    manner, making it more suitable than point-wise metrics for evaluating
+    attack region detection.
 
     Args:
-        ref: Binary reference segmentation (1=boundary/attack, 0=normal).
-        hyp: Binary hypothesis segmentation (same shape as ref).
-        k: Half the mean segment size. If None, computed from ref.
+        ref: Binary reference segmentation array of shape (N,). Values are
+            1 for attack/boundary packets and 0 for normal packets.
+        hyp: Binary hypothesis segmentation array of shape (N,). Same format
+            as ref; typically derived by thresholding anomaly scores.
+        k: Half-window size (int). If None, automatically computed as half
+            the mean segment length derived from reference boundaries.
 
     Returns:
-        WindowDiff score in [0, 1]. Lower is better.
+        float: WindowDiff score in [0.0, 1.0]. Lower values indicate better
+            segmentation agreement. Returns 0.0 if there are no boundaries
+            in the reference or if k >= N.
     """
     ref = ref.astype(np.int32)
     hyp = hyp.astype(np.int32)
@@ -123,13 +150,25 @@ def windowdiff(ref: np.ndarray, hyp: np.ndarray, k: int = None) -> float:
 
 
 def plot_roc(results_by_variant: dict, save_path: str, attack_name: str):
-    """
-    Plot ROC curves for all variants of a given attack on the same figure.
+    """Plot ROC curves for all KitNET variants on a single figure.
+
+    Creates a Receiver Operating Characteristic (ROC) plot with FPR on the
+    x-axis and TPR (Recall) on the y-axis. Each variant is plotted in a
+    distinct color with its best F1 score shown in the legend. The best
+    operating point for each variant is marked with a scatter dot.
+
+    Supported variant colors: 'elm' (blue), 'elm_reg' (green),
+    'conv1d' (orange), 'transformer' (red). Unknown variants use gray.
 
     Args:
-        results_by_variant: Dict of {variant_name: metrics_dict}.
-        save_path: Path to save PNG.
-        attack_name: For the plot title.
+        results_by_variant: Dictionary mapping variant name (str) to a
+            metrics dictionary as returned by threshold_sweep(). Must contain
+            keys 'fpr_values', 'recall_values', 'best_f1', 'best_fpr',
+            and 'best_recall'.
+        save_path: Filesystem path (str) where the PNG image will be saved.
+            Parent directories are created automatically.
+        attack_name: Attack name (str) used in the plot title. Underscores
+            are replaced with spaces for display.
     """
     fig, ax = plt.subplots(figsize=(8, 7))
     colors = {'elm': 'blue', 'elm_reg': 'green', 'conv1d': 'orange', 'transformer': 'red'}
@@ -161,7 +200,21 @@ def plot_roc(results_by_variant: dict, save_path: str, attack_name: str):
 
 
 def save_results(results: dict, path: str):
-    """Save results dict as JSON (strip numpy arrays for serialization)."""
+    """Save experiment results as a JSON file, stripping numpy arrays.
+
+    Serializes only the scalar metrics (best_f1, best_threshold,
+    best_recall, best_fpr, and optionally windowdiff) for each
+    attack/variant combination. Numpy arrays (thresholds, f1_values, etc.)
+    are excluded since they are not JSON-serializable and are only needed
+    for plotting.
+
+    Args:
+        results: Nested dictionary of shape {attack_name: {variant_name:
+            metrics_dict}}. Each metrics_dict should contain at least
+            'best_f1', 'best_threshold', 'best_recall', 'best_fpr'.
+        path: Filesystem path (str) for the output JSON file. Parent
+            directories are created automatically.
+    """
     serializable = {}
     for attack, variants in results.items():
         serializable[attack] = {}

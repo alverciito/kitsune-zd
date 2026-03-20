@@ -9,26 +9,54 @@ from sklearn.cluster import KMeans as skKMeans
 
 
 class KMeansClust:
-    """
-    KMeans clustering for feature grouping.
-    Same interface as CorClust: update(x), cluster(max_clust).
+    """KMeans-based feature clustering for KitNET ensemble layer.
+
+    Clusters features by running sklearn KMeans on the transposed feature
+    matrix, treating each feature's time series as a sample in cluster space.
+    Provides the same interface as CorClust and DBSCANClust: update(x) to
+    accumulate samples, cluster(n) to produce feature groups.
+
+    This is a simpler alternative to DBSCAN clustering, with deterministic
+    convergence but no noise handling.
+
+    Attributes:
+        n: Number of features in the input data.
+        buffer: List of accumulated feature vectors for batch clustering.
     """
 
     def __init__(self, n: int):
+        """Initialize the KMeans clustering buffer.
+
+        Args:
+            n: Number of features in the input data (int).
+        """
         self.n = n
         self.buffer = []
 
     def update(self, x: np.ndarray):
-        """Accumulate a single sample x of shape (n,)."""
+        """Accumulate a single sample for later batch clustering.
+
+        Args:
+            x: Feature vector of shape (n,) for one packet/sample.
+        """
         self.buffer.append(x)
 
     def cluster(self, n_clusters: int) -> list:
-        """
-        Cluster features into n_clusters groups using KMeans
-        on the transposed feature matrix.
+        """Cluster features into n_clusters groups using KMeans.
+
+        Transposes the accumulated buffer so each "sample" is a feature's
+        time series, then fits KMeans with 10 random initializations. The
+        buffer is cleared after clustering. If n_clusters exceeds the number
+        of features, it is clamped to avoid sklearn errors.
+
+        Args:
+            n_clusters: Target number of feature groups (int). Typically
+                N_FEATURES / MAX_AE_SIZE.
 
         Returns:
-            List of lists of feature indices.
+            list[list[int]]: List of feature index lists. Each inner list
+                contains the indices of features assigned to one ensemble AE.
+                Empty clusters are removed.
         """
         x = np.array(self.buffer)
         self.buffer = []

@@ -13,29 +13,65 @@ log = logging.getLogger(__name__)
 
 
 class DBSCANClust:
-    """
-    DBSCAN clustering that iteratively adjusts eps to produce
-    approximately n_clusters groups. Falls back to splitting
-    the largest cluster if convergence isn't reached.
+    """DBSCAN-based feature clustering with iterative epsilon tuning.
 
-    Same interface as CorClust: update(x), cluster(max_clust).
+    Clusters features by running DBSCAN on the transposed, min-max normalized
+    feature matrix. The epsilon parameter is iteratively adjusted with decaying
+    momentum to converge on the target number of clusters. If convergence is
+    not reached within 100 iterations, the result is used as-is with a warning.
+
+    A post-processing step ensures all clusters have at least 2 features by
+    redistributing features from the largest cluster. This is the default
+    clustering method per Table II of the paper (DEFAULT_CLUSTERING = 'dbscan').
+
+    Same interface as CorClust: update(x) to accumulate samples, cluster(n)
+    to produce feature groups.
+
+    Attributes:
+        n: Number of features in the input data.
+        buffer: List of accumulated feature vectors for batch clustering.
     """
 
     def __init__(self, n: int):
+        """Initialize the DBSCAN clustering buffer.
+
+        Args:
+            n: Number of features in the input data (int).
+        """
         self.n = n
         self.buffer = []
 
     def update(self, x: np.ndarray):
-        """Accumulate a single sample x of shape (n,)."""
+        """Accumulate a single sample for later batch clustering.
+
+        Unlike CorClust (which computes incremental statistics), DBSCANClust
+        stores raw feature vectors in a buffer for batch processing.
+
+        Args:
+            x: Feature vector of shape (n,) for one packet/sample.
+        """
         self.buffer.append(x)
 
     def cluster(self, n_clusters: int) -> list:
-        """
-        Cluster features into n_clusters groups using DBSCAN on
-        the transposed feature matrix.
+        """Cluster features into approximately n_clusters groups using DBSCAN.
+
+        The algorithm works as follows:
+        1. Min-max normalizes the accumulated buffer to [0, 1].
+        2. Transposes so each "sample" is a feature's time series.
+        3. Iteratively runs DBSCAN with adjusted eps (momentum-decayed)
+           until the desired number of clusters is achieved or 100 epochs.
+        4. Post-processes: shifts noise labels, ensures min cluster size of 2,
+           and removes empty clusters.
+
+        The buffer is cleared after clustering.
+
+        Args:
+            n_clusters: Target number of feature groups (int). Typically
+                N_FEATURES / MAX_AE_SIZE.
 
         Returns:
-            List of lists of feature indices.
+            list[list[int]]: List of feature index lists. Each inner list
+                contains the indices of features assigned to one ensemble AE.
         """
         x = np.array(self.buffer)
         x = (x - np.min(x, axis=0)) / (np.max(x, axis=0) - np.min(x, axis=0) + 1e-16)

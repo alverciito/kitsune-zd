@@ -36,23 +36,56 @@ _DL_TYPES = {'conv1d', 'conv2d', 'transformer', 'deep_mlp', 'lstm'}
 
 
 class KitNET:
-    """
-    KitNET ensemble of autoencoders.
+    """KitNET: An Ensemble of Autoencoders for Online Network Intrusion Detection.
+
+    Implements the three-phase KitNET pipeline (Section III of the paper):
+        Phase 1 (Feature Mapping): Clusters correlated features into subsets
+            using hierarchical correlation clustering, DBSCAN, or K-Means.
+        Phase 2 (AD Training): Trains one autoencoder per feature cluster
+            to learn normal traffic reconstruction, then trains an output
+            aggregation layer on the ensemble RMSE scores.
+        Phase 3 (Execution): Scores new samples by computing per-AE RMSE
+            and aggregating through the output layer.
+
+    The ensemble supports multiple autoencoder backends: lightweight ELM
+    for packet-by-packet processing, or deep-learning variants (Conv1D,
+    Conv2D, Transformer, DeepMLP, LSTM) that operate on sliding windows
+    of packets. A statistical baseline ('stat') is also available.
+
+    Attributes:
+        feature_map: List of index arrays mapping features to ensemble AEs,
+            populated after Phase 1.
+        ensemble: List of trained autoencoder instances, one per cluster.
+        output_ae: Aggregation layer (ELM or statistical) that converts
+            per-AE RMSE vectors into a single anomaly score.
 
     Args:
-        n_features: Number of input features (e.g. 115).
-        ae_type: 'elm', 'conv1d', 'conv2d', 'transformer', 'deep_mlp', 'lstm', 'stat'.
-        clustering: 'corr', 'dbscan', or 'kmeans'.
-        output_ae_type: 'elm' or 'stat'. Type of output aggregation layer.
-        ar: If True, use autoregressive mode (DL models only).
-        max_ae_size: Maximum features per ensemble autoencoder.
-        hidden_ratio: Compression ratio for hidden layers.
-        lr: Learning rate.
-        fm_grace: Number of samples for feature mapping phase.
-        ad_grace: Number of samples for AD training phase.
-        exec_window: Batch size for execution phase.
-        seq_len: Window size for windowed variants.
-        device: PyTorch device for DL variants.
+        n_features: Number of input features per sample (e.g., 115 for
+            the AfterImage feature extractor).
+        ae_type: Autoencoder backend type. One of 'elm', 'conv1d',
+            'conv2d', 'transformer', 'deep_mlp', 'lstm', 'stat'.
+        clustering: Feature clustering algorithm. One of 'corr'
+            (hierarchical correlation), 'dbscan', or 'kmeans'.
+        output_ae_type: Output aggregation layer type. 'elm' (default)
+            for a single-layer ELM, or 'stat' for statistical scoring.
+        ar: If True, use autoregressive windowing for DL models
+            (predict next frame instead of reconstructing last frame).
+            Only applicable to DL ae_types.
+        max_ae_size: Maximum number of features assigned to a single
+            ensemble autoencoder during clustering.
+        hidden_ratio: Compression ratio for hidden layer size
+            (default: 0.22, Table II of the paper).
+        lr: Learning rate for Adam optimizer (DL types) or ELM.
+            Defaults to config.LEARNING_RATE if None.
+        fm_grace: Number of samples consumed during Phase 1
+            (Feature Mapping grace period).
+        ad_grace: Number of samples consumed during Phase 2
+            (Anomaly Detection training grace period).
+        exec_window: Batch size for Phase 3 execution. Controls memory
+            usage during scoring.
+        seq_len: Sliding window length in packets for DL variants
+            (default: 800, Table II of the paper).
+        device: PyTorch device string ('cuda' or 'cpu') for DL variants.
     """
 
     def __init__(self, n_features: int, ae_type: str = 'elm',
@@ -91,7 +124,22 @@ class KitNET:
         self.output_ae = None
 
     def _make_ae(self, n_visible: int):
-        """Factory: create an autoencoder of the configured type."""
+        """Create an autoencoder of the configured type for an ensemble slot.
+
+        Factory method that instantiates the appropriate autoencoder class
+        based on ``self.ae_type``, forwarding relevant hyperparameters
+        (hidden_ratio, lr, seq_len, device, ar).
+
+        Args:
+            n_visible: Number of input features for this ensemble member,
+                determined by the clustering step.
+
+        Returns:
+            An autoencoder instance with ``train()`` and ``execute()`` methods.
+
+        Raises:
+            ValueError: If ``self.ae_type`` is not a recognized type.
+        """
         if self.ae_type == 'elm':
             return ELMAutoencoder(n_visible, self.hidden_ratio, self.lr)
         elif self.ae_type == 'stat':
@@ -115,7 +163,20 @@ class KitNET:
             raise ValueError(f"Unknown ae_type: {self.ae_type}")
 
     def _make_output_ae(self, n_inputs: int):
-        """Create the output aggregation layer."""
+        """Create the output aggregation layer for ensemble score fusion.
+
+        The output layer receives a vector of per-AE RMSE scores (one per
+        ensemble member) and produces a single anomaly score. Supports ELM
+        (default) or statistical aggregation.
+
+        Args:
+            n_inputs: Number of ensemble autoencoders, i.e., the
+                dimensionality of the RMSE vector fed to this layer.
+
+        Returns:
+            An autoencoder instance (ELMAutoencoder or StatisticalAnomaly)
+            with ``train()`` and ``execute()`` methods.
+        """
         if self.output_ae_type == 'stat':
             return StatisticalAnomaly(n_inputs)
         else:
@@ -126,7 +187,16 @@ class KitNET:
             )
 
     def _build_ensemble(self):
-        """Build ensemble autoencoders from the feature map."""
+        """Build ensemble autoencoders and output layer from the feature map.
+
+        Iterates over ``self.feature_map`` (produced by Phase 1 clustering)
+        and creates one autoencoder per feature cluster via ``_make_ae``.
+        Also instantiates the output aggregation layer sized to accept
+        one RMSE score per ensemble member.
+
+        Side effects:
+            Populates ``self.ensemble`` and ``self.output_ae``.
+        """
         self.ensemble = [self._make_ae(len(fmap)) for fmap in self.feature_map]
         self.output_ae = self._make_output_ae(len(self.ensemble))
         n_hidden = getattr(self.output_ae, 'n_hidden', '?')
@@ -134,11 +204,25 @@ class KitNET:
                  f"output layer ({self.output_ae_type}): {len(self.ensemble)} -> {n_hidden}")
 
     def run(self, X: np.ndarray):
-        """
-        Run the full KitNET pipeline on dataset X of shape (N, n_features).
+        """Run the full three-phase KitNET pipeline on a dataset.
+
+        Sequentially executes:
+            1. Phase 1 (Feature Mapping): Feeds the first ``fm_grace``
+               samples to the clusterer, then generates the feature map.
+            2. Phase 2 (AD Training): Trains all ensemble AEs and the
+               output layer on the next ``ad_grace`` samples.
+            3. Phase 3 (Execution): Scores all remaining samples.
+
+        Args:
+            X: Input data array of shape ``(N, n_features)`` where N is
+                the total number of samples. Must have at least
+                ``fm_grace + ad_grace`` samples for training; any
+                remainder is scored in the execution phase.
 
         Returns:
-            scores: np.ndarray of anomaly scores for the execution phase.
+            np.ndarray: Anomaly scores for the execution-phase samples,
+                shape ``(N - fm_grace - ad_grace,)``. Returns an empty
+                array if no data remains after the training phases.
         """
         N = len(X)
         total_train = self.fm_grace + self.ad_grace
@@ -177,9 +261,19 @@ class KitNET:
         return scores
 
     def _train_elm(self, train_data: np.ndarray) -> np.ndarray:
-        """
-        ELM/stat training: process sample-by-sample through each ensemble AE.
-        Then train the output layer on the RMSE matrix.
+        """Phase 2 training path for ELM and statistical autoencoders.
+
+        Trains each ensemble AE on its feature subset by passing the
+        full training data in one call (ELM/stat AEs handle batching
+        internally). Collects per-AE RMSE scores into a matrix and
+        trains the output aggregation layer on it.
+
+        Args:
+            train_data: Training samples of shape ``(N, n_features)``.
+
+        Returns:
+            np.ndarray: RMSE matrix of shape ``(N, n_aes)`` produced
+                during ensemble training, used to train the output layer.
         """
         n_aes = len(self.ensemble)
         N = len(train_data)
@@ -196,9 +290,21 @@ class KitNET:
         return rmse_matrix
 
     def _train_dl(self, train_data: np.ndarray) -> np.ndarray:
-        """
-        DL training: batch train each ensemble AE.
-        Then train output layer on the ensemble RMSE matrix.
+        """Phase 2 training path for deep-learning autoencoders.
+
+        Batch-trains each ensemble AE (Conv1D, Conv2D, Transformer,
+        DeepMLP, LSTM) on its feature subset. Because windowed AEs may
+        produce different RMSE lengths (due to window truncation), the
+        resulting vectors are truncated to the minimum length before
+        column-stacking into the RMSE matrix. The output aggregation
+        layer is then trained on this matrix.
+
+        Args:
+            train_data: Training samples of shape ``(N, n_features)``.
+
+        Returns:
+            np.ndarray: RMSE matrix of shape ``(min_len, n_aes)`` where
+                ``min_len`` is the shortest per-AE RMSE vector length.
         """
         n_aes = len(self.ensemble)
         rmse_list = []
@@ -221,7 +327,27 @@ class KitNET:
         return rmse_matrix
 
     def _execute(self, data: np.ndarray) -> np.ndarray:
-        """Execute in batches of exec_window size."""
+        """Phase 3: score data in batches through the trained ensemble.
+
+        Processes the execution-phase data in chunks of ``exec_window``
+        size to control memory usage. For each chunk:
+            1. Each ensemble AE scores its feature subset, producing
+               per-sample RMSE values.
+            2. RMSE vectors are stacked into a matrix of shape
+               ``(chunk_len, n_aes)``.
+            3. The output layer scores the RMSE matrix to produce
+               final anomaly scores.
+
+        For DL types, the back_window mechanism in each AE ensures
+        sliding-window continuity across chunk boundaries.
+
+        Args:
+            data: Execution-phase samples of shape ``(N, n_features)``.
+
+        Returns:
+            np.ndarray: Anomaly scores of shape ``(N,)`` (may be slightly
+                shorter for DL types due to windowing edge effects).
+        """
         all_scores = []
         n_aes = len(self.ensemble)
         is_dl = self.ae_type in _DL_TYPES

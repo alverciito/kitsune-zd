@@ -25,7 +25,28 @@ from ...common.config import EPSILON, BATCH_SIZE
 
 
 class LSTMModel(tf.keras.Model):
-    """LSTM autoencoder: encodes sequence, decodes last frame."""
+    """TensorFlow LSTM autoencoder model from the original implementation.
+
+    Architecture (matching tf_original lstm.py):
+        Encoder: LSTM(n_hidden, return_sequences=False)
+        Decoder: Dense(n_hidden, relu) -> Dense(n_visible, sigmoid)
+
+    The LSTM encoder processes the full input sequence and returns only
+    the final hidden state (``return_sequences=False``). The decoder
+    then maps this fixed-size representation back to a single output
+    frame.
+
+    Note: The PyTorch version uses ``nn.LSTM`` with similar topology
+    but may differ in gate initialization (TF uses Glorot uniform for
+    the kernel, orthogonal for the recurrent kernel; PyTorch uses
+    uniform for both). Both versions support autoregressive mode.
+
+    Args:
+        n_visible: Number of input features per time step.
+        n_hidden: LSTM hidden state size and bottleneck dimensionality.
+        seq_len: Expected input sequence length (used for Input shape
+            specification only).
+    """
 
     def __init__(self, n_visible: int, n_hidden: int, seq_len: int):
         super().__init__()
@@ -40,17 +61,52 @@ class LSTMModel(tf.keras.Model):
         ], name='decoder')
 
     def call(self, x):
+        """Forward pass: encode the input sequence via LSTM then decode to a single frame.
+
+        Args:
+            x: Input tensor of shape ``(batch, seq_len, n_visible)``.
+
+        Returns:
+            Tensor of shape ``(batch, n_visible)`` -- reconstructed (or
+            predicted) single frame.
+        """
         encoded = self.encoder(x)
         decoded = self.decoder(encoded)
         return decoded
 
 
 class LSTMAutoencoder:
-    """
-    Wrapper matching the Conv1DAutoencoder interface.
+    """TensorFlow LSTM windowed autoencoder.
 
-    Uses TensorFlow internally. Handles normalization, windowing,
-    training and evaluation with the same API as PyTorch variants.
+    Architecture from the original paper implementation:
+        Encoder: LSTM(n_hidden, return_sequences=False)
+        Decoder: Dense(n_hidden, relu) -> Dense(n_visible, sigmoid)
+
+    Supports two windowing modes:
+      * **TSR** (``ar=False``): reconstruct the last frame of each window.
+      * **AR** (``ar=True``): predict the next frame following the window
+        (autoregressive).
+
+    Note: Architecture differs from the PyTorch version primarily in
+    LSTM gate initialization defaults. The PyTorch version also wraps
+    the LSTM in ``nn.Module`` subclass whereas TF uses ``Sequential``.
+    Both produce comparable anomaly detection results.
+
+    Handles min-max normalization, sliding-window construction, Keras
+    model training, and RMSE scoring. Exposes the same ``train()`` /
+    ``execute()`` contract as all other autoencoder variants so that
+    ``KitNET`` can use any backend interchangeably.
+
+    Args:
+        n_visible: Number of input features per packet.
+        hidden_ratio: Compression ratio for the LSTM hidden state
+            (default: 0.75, Table II).
+        lr: Learning rate for the Adam optimizer (default: 0.001).
+        seq_len: Sliding-window length in packets (default: 500).
+        ar: If True, use autoregressive windowing -- predict the *next*
+            frame instead of reconstructing the *last* frame.
+        device: Ignored (kept for API compatibility with PyTorch backend).
+        **kwargs: Absorbed silently for forward-compatible construction.
     """
 
     def __init__(self, n_visible: int, hidden_ratio: float = 0.75,
@@ -73,13 +129,33 @@ class LSTMAutoencoder:
         self.back_window = None
 
     def _normalize(self, x: np.ndarray) -> np.ndarray:
+        """Apply min-max normalization using statistics stored during training.
+
+        Args:
+            x: Array of shape ``(N, n_visible)``.
+
+        Returns:
+            np.ndarray: Normalized array with values in roughly [0, 1].
+        """
         return (x - self.norm_min) / (self.norm_max - self.norm_min + EPSILON)
 
     def _make_windows_and_targets(self, x_norm: np.ndarray):
-        """
-        Create (window, target) pairs.
-        - TSR mode (ar=False): window = x[i:i+seq_len], target = x[i+seq_len-1] (last frame)
-        - AR mode (ar=True): window = x[i:i+seq_len], target = x[i+seq_len] (next frame)
+        """Create sliding-window input/target pairs from normalized data.
+
+        Two modes are supported:
+          * **TSR** (``ar=False``): window = ``x[i:i+seq_len]``,
+            target = ``x[i+seq_len-1]`` (reconstruct last frame).
+          * **AR** (``ar=True``): window = ``x[i:i+seq_len]``,
+            target = ``x[i+seq_len]`` (predict next frame).
+
+        Args:
+            x_norm: Normalized data of shape ``(T, n_visible)``.
+
+        Returns:
+            Tuple of ``(windows, targets)`` where *windows* has shape
+            ``(n_windows, seq_len, n_visible)`` and *targets* has shape
+            ``(n_windows, n_visible)``. Returns empty arrays if the
+            input is too short.
         """
         if self.ar:
             # Need seq_len+1 consecutive frames
@@ -99,9 +175,21 @@ class LSTMAutoencoder:
             return windows[:min_len], targets[:min_len]
 
     def train(self, data: np.ndarray) -> np.ndarray:
-        """
-        Train on data of shape (N, n_visible).
-        Returns: Per-window RMSE array.
+        """Fit the autoencoder on training data and return per-window RMSE.
+
+        Computes and stores min-max normalization statistics, constructs
+        sliding windows, trains the Keras model for one epoch, and
+        evaluates reconstruction error on the training windows. Also
+        saves the trailing ``seq_len - 1`` frames as ``back_window`` for
+        seamless continuity when ``execute()`` is called later.
+
+        Args:
+            data: Training data of shape ``(N, n_visible)``.
+
+        Returns:
+            np.ndarray: Per-window RMSE array of shape ``(n_windows,)``.
+            Returns an empty array if the data is too short to form any
+            window.
         """
         self.norm_max = np.max(data, axis=0)
         self.norm_min = np.min(data, axis=0)
@@ -126,9 +214,23 @@ class LSTMAutoencoder:
         return rmse
 
     def execute(self, data: np.ndarray) -> np.ndarray:
-        """
-        Score data of shape (N, n_visible). Returns per-sample RMSE.
-        Prepends saved back_window for sliding window continuity.
+        """Score new data using the trained autoencoder.
+
+        Normalizes the input, prepends the saved ``back_window`` from
+        the previous call (training or execution) to maintain sliding-
+        window continuity, constructs windows, and computes per-window
+        RMSE. The returned array is aligned to the *input* batch: if
+        more RMSE values are produced than input rows, only the last
+        ``len(data)`` values are returned.
+
+        Args:
+            data: Execution data of shape ``(N, n_visible)``.
+
+        Returns:
+            np.ndarray: Per-sample RMSE array. Shape is at most
+            ``(N,)``; may be shorter if the extended sequence is too
+            short to form full windows. Returns zeros if no windows
+            can be formed.
         """
         x_norm = self._normalize(data).astype(np.float32)
 
